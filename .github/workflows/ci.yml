@@ -1,0 +1,188 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: '24.21.0'
+
+jobs:
+  verify:
+    name: Lint, types, tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check formatting
+        run: npm run format:check
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test with coverage
+        run: npm run test:coverage
+
+  commitlint:
+    name: Commit messages
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - uses: wagoid/commitlint-github-action@v6
+        with:
+          configFile: commitlint.config.mjs
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: verify
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - run: npm ci
+      - run: npm run build
+      - name: Smoke test the compiled output
+        run: |
+          node dist/index.js &
+          APP_PID=$!
+          sleep 2
+          curl --fail --silent --show-error http://127.0.0.1:3000/health
+          echo
+      - name: Verify graceful shutdown on SIGTERM
+        run: |
+          pkill -TERM -f "node dist/index.js" || true
+          for _ in $(seq 1 15); do
+            if ! kill -0 "$(pgrep -f 'node dist/index.js' | head -1)" 2>/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          if pgrep -f "node dist/index.js" > /dev/null; then
+            echo "process did not exit on SIGTERM"
+            exit 1
+          fi
+          echo "process exited on SIGTERM"
+
+  pm2:
+    name: PM2
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: verify
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - run: npm ci
+      - run: npm run build
+
+      - name: Start under PM2 and check the process is healthy
+        run: |
+          npx pm2 start ecosystem.config.cjs
+          sleep 3
+          npx pm2 jlist | node -e "
+            let raw='';
+            process.stdin.on('data',c=>raw+=c).on('end',()=>{
+              const [app]=JSON.parse(raw);
+              if(!app||app.pm2_env.status!=='online'){
+                console.error('expected an online process, got', app && app.pm2_env.status);
+                process.exit(1);
+              }
+              console.log('pm2 process is', app.pm2_env.status, 'with pid', app.pid);
+            });
+          "
+          curl --fail --silent --show-error http://127.0.0.1:3000/health
+          echo
+
+      - name: Restart under PM2
+        run: |
+          PID_BEFORE=$(npx pm2 pid node_boilerplate_psql)
+          npx pm2 restart ecosystem.config.cjs --update-env
+          sleep 3
+          PID_AFTER=$(npx pm2 pid node_boilerplate_psql)
+          echo "pid before=$PID_BEFORE after=$PID_AFTER"
+          if [ "$PID_BEFORE" = "$PID_AFTER" ]; then
+            echo "restart did not replace the process"
+            exit 1
+          fi
+          curl --fail --silent --show-error http://127.0.0.1:3000/health
+          echo
+
+      - name: Logs land in the log files
+        run: |
+          test -f logs/out.log
+          grep -q "Service started" logs/out.log
+          echo "logs/out.log is being written"
+
+      - name: Stop PM2 daemon
+        if: always()
+        run: npx pm2 kill
+
+  docker:
+    name: Docker image
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: verify
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: node_boilerplate_psql:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Run container and check health endpoint
+        run: |
+          docker run -d --name node_boilerplate_psql-ci -p 3000:3000 node_boilerplate_psql:ci
+          for i in $(seq 1 20); do
+            if curl --fail --silent http://127.0.0.1:3000/health; then
+              echo "\ncontainer is healthy"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "container did not become healthy"
+          docker logs node_boilerplate_psql-ci
+          exit 1

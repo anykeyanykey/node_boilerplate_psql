@@ -1,0 +1,21 @@
+---
+description: Project-wide rules for the Node.js + TypeScript boilerplate
+alwaysApply: true
+---
+
+Read [AGENTS.md](../../AGENTS.md) at the repository root first — it is the single
+source of truth. This file only points Cursor at it.
+
+Non-negotiables, summarised (details in `AGENTS.md`):
+
+- `npm run verify` is the gate: prettier, eslint, `tsc --noEmit`, vitest.
+- Never relax the strict flags in `tsconfig.json` — fix the code instead. The usual
+  offenders are `noUncheckedIndexedAccess`, `noPropertyAccessFromIndexSignature`
+  (`process.env['X']`, not `process.env.X`) and `erasableSyntaxOnly` (no `enum`).
+- `kill_timeout` in `ecosystem.config.cjs` must stay above `SHUTDOWN_TIMEOUT_MS`
+  in `src/config.ts`. There is a test for this; do not silence it.
+- New code needs a test in `test/` mirroring the `src/` filename, or coverage
+  thresholds fail.
+- No default exports, named exports only. Tests import from `../src/x.js` with
+  the `.js` extension.
+- On Windows use `npm.cmd`; `npm.ps1` is blocked by the execution policy.

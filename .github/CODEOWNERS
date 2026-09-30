@@ -1,0 +1,12 @@
+# Default owner for everything not matched below
+* @anykeyanykey
+
+# Tooling and CI changes need a second pair of eyes
+/.github/          @anykeyanykey
+/Dockerfile        @anykeyanykey
+/docker-compose.yml @anykeyanykey
+/ecosystem.config.cjs @anykeyanykey
+/package.json      @anykeyanykey
+/tsconfig.json     @anykeyanykey
+/eslint.config.mjs @anykeyanykey
+/AGENTS.md         @anykeyanykey

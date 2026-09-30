@@ -1,0 +1,49 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: 'chore(deps)'
+    labels:
+      - dependencies
+    groups:
+      # One PR for routine bumps instead of one PR per package.
+      minor-patches:
+        update-types:
+          - minor
+          - patch
+        exclude-patterns:
+          - 'typescript'
+      # Dependabot will open majors for review, but keep them out of the routine PR.
+      major-types:
+        update-types:
+          - major
+        exclude-patterns:
+          - 'typescript'
+    ignore:
+      # typescript-eslint@8 has a peer range of >=4.8.4 <6.1.0, so TypeScript 7
+      # breaks `npm run lint` outright. Drop this entry once typescript-eslint@9
+      # ships with support.
+      - dependency-name: typescript
+        update-types:
+          - version-update:semver-major
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    labels:
+      - dependencies
+      - ci
+    groups:
+      # Actions majors can change runner requirements; review them as one unit.
+      actions:
+        patterns:
+          - '*'
+    commit-message:
+      prefix: 'chore(deps)'
