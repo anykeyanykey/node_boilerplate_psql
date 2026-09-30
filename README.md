@@ -13,6 +13,8 @@ Node.js + TypeScript boilerplate: strict-типизация, линтер, те�
 | Тесты          | Vitest 5 + `@vitest/coverage-v8`                                |
 | Валидация env  | Zod 4                                                           |
 | Логи           | Pino 10 (+ pino-pretty в dev)                                   |
+| База данных    | PostgreSQL 18, драйвер `pg`                                     |
+| ORM            | Drizzle ORM (`drizzle-orm` + `drizzle-kit`)                     |
 | Контейнер      | multi-stage Dockerfile на `node:24-alpine`, non-root, tini      |
 
 ## Быстрый старт
@@ -20,10 +22,81 @@ Node.js + TypeScript boilerplate: strict-типизация, линтер, те�
 ```bash
 npm install
 cp .env.example .env
+docker compose up -d db     # Postgres, если его ещё нет
 npm run dev
 ```
 
-Сервис поднимется на `http://localhost:3000`, health-check — `GET /health` → `{"status":"ok"}`.
+Сервис поднимется на `http://localhost:3000`, health-check — `GET /health`.
+
+## База данных
+
+Схема живёт в TypeScript, а не в SQL-файлах: Drizzle выводит типы колонок
+прямо из деклараций, поэтому кодогенерации и сгенерированного клиента нет.
+
+```ts
+import { pgTable, uuid, text, timestamp } from 'drizzle-orm/pg-core';
+
+export const users = pgTable('users', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  name: text('name').notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+});
+```
+
+`src/db/schema.ts` в boilerplate намеренно пуст — здесь только инструментарий,
+доменную модель описываете вы.
+
+| Команда               | Что делает                                                |
+| --------------------- | --------------------------------------------------------- |
+| `npm run db:generate` | SQL-миграция из изменений схемы в `drizzle/` (коммитится) |
+| `npm run db:migrate`  | Применяет миграции к `DATABASE_URL`                       |
+| `npm run db:push`     | Синхронизирует схему напрямую, без миграций — только dev  |
+| `npm run db:check`    | Проверяет целостность цепочки миграций                    |
+| `npm run db:studio`   | GUI для просмотра данных                                  |
+
+Схема и миграции должны быть в одном коммите: CI заново генерирует миграцию и падает,
+если появился diff — расхождение не попадёт в main.
+
+`drizzle.config.ts` читает `DATABASE_URL` из окружения, а npm-скрипты подгружают `.env`
+через `node --env-file-if-exists`. В Docker-образ миграции не копируются: `drizzle-kit`
+это dev-зависимость, а образ и так остаётся без неё. Применяйте миграции из CI
+или с хоста, до раскатки новой версии.
+
+### Слой доступа
+
+| Файл               | Ответственность                                           |
+| ------------------ | --------------------------------------------------------- |
+| `src/db/schema.ts` | Таблицы. Единственное место, где объявляется форма данных |
+| `src/db/pool.ts`   | `pg.Pool` из конфига, обработчик ошибок на idle-клиенте   |
+| `src/db/client.ts` | `drizzle({ client: pool })` + `ping` / `close`            |
+| `src/db/health.ts` | Пинг БД и сборка отчёта для `/health`                     |
+
+`createDatabase` возвращает `{ pool, db, ping, close }`. `db` — типизированный
+экземпляр Drizzle, `db.$client` — исходный пул, если понадобится сырой SQL.
+
+## Health-check и отказоустойчивость
+
+`GET /health` пингует базу и отвечает в зависимости от `DB_REQUIRED`:
+
+| Ситуация      | `DB_REQUIRED=true` | `DB_REQUIRED=false` |
+| ------------- | ------------------ | ------------------- |
+| БД доступна   | `200 ok`           | `200 ok`            |
+| БД недоступна | `503 error`        | `200 degraded`      |
+
+```json
+{ "status": "ok", "checks": { "database": { "state": "up", "latencyMs": 2 } } }
+```
+
+Причина сбоя в ответе намеренноgeneric — `ping_failed`, а не текст ошибки драйвера,
+где могут быть хост, имя БД и часть строки подключения. Подробности пишутся в лог.
+
+`DB_REQUIRED=true` (по умолчанию) означает две вещи: при старте процесс проверяет
+соединение и падает, если базы нет, и `/health` возвращает 503 при падении базы.
+Для инстанса под оркестратором это правильное поведение — контейнер уходит в рестарт,
+а не продолжает принимать трафик, который не обработает.
+
+Пул закрывается после graceful shutdown: сначала дожидаются закрытия HTTP-листенера,
+затем `pool.end()`. Порядок важен — иначе соединение оборвётся под in-flight запросами.
 
 ## Скрипты
 
@@ -40,6 +113,11 @@ npm run dev
 | `npm run test:coverage` | Тесты + coverage c порогами            |
 | `npm run verify`        | format:check → lint → typecheck → test |
 | `npm run clean`         | Удаление `dist/` и `coverage/`         |
+| `npm run db:generate`   | Сгенерировать SQL-миграцию из схемы    |
+| `npm run db:migrate`    | Применить миграции к `DATABASE_URL`    |
+| `npm run db:push`       | Синхронизировать схему напрямую (dev)  |
+| `npm run db:check`      | Проверить целостность миграций         |
+| `npm run db:studio`     | GUI для данных                         |
 | `npm run docker:build`  | Сборка образа                          |
 | `npm run docker:run`    | Запуск контейнера с `.env`             |
 
@@ -94,15 +172,32 @@ npm run pm2:flush    # очистить логи
 Все переменные окружения валидируются Zod в `src/config.ts` — при ошибке процесс падает
 на старте с понятным сообщением, а не в рантайме.
 
-| Переменная            | Тип                                     | По умолчанию            |
-| --------------------- | --------------------------------------- | ----------------------- |
-| `NODE_ENV`            | `development` \| `test` \| `production` | `development`           |
-| `LOG_LEVEL`           | `trace`…`fatal`                         | `info`                  |
-| `SERVICE_NAME`        | string                                  | `node_boilerplate_psql` |
-| `HOST`                | string                                  | `0.0.0.0`               |
-| `PORT`                | 1–65535                                 | `3000`                  |
-| `SHUTDOWN_TIMEOUT_MS` | положительное целое                     | `10000`                 |
-| `API_TOKEN`           | string (опционально)                    | —                       |
+| Переменная                                                              | Тип                                     | По умолчанию                   |
+| ----------------------------------------------------------------------- | --------------------------------------- | ------------------------------ |
+| `NODE_ENV`                                                              | `development` \| `test` \| `production` | `development`                  |
+| `LOG_LEVEL`                                                             | `trace`…`fatal`                         | `info`                         |
+| `SERVICE_NAME`                                                          | string                                  | `node_boilerplate_psql`        |
+| `HOST`                                                                  | string                                  | `0.0.0.0`                      |
+| `PORT`                                                                  | 1–65535                                 | `3000`                         |
+| `SHUTDOWN_TIMEOUT_MS`                                                   | положительное целое                     | `10000`                        |
+| `API_TOKEN`                                                             | string (опционально)                    | —                              |
+| `DATABASE_URL`                                                          | корректный URL                          | **обязателен**                 |
+| `DATABASE_POOL_MAX`                                                     | 1–100                                   | `10`                           |
+| `DATABASE_IDLE_TIMEOUT_MS`                                              | целое ≥ 0                               | `30000`                        |
+| `DATABASE_CONNECT_TIMEOUT_MS`                                           | целое ≥ 0                               | `5000`                         |
+| `DATABASE_STATEMENT_TIMEOUT_MS`                                         | целое ≥ 0                               | `10000`                        |
+| `DATABASE_SSL`                                                          | `true` \| `false`                       | `false`                        |
+| `DB_REQUIRED`                                                           | `true` \| `false`                       | `true`                         |
+| `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` / `POSTGRES_PORT` | compose                                 | `app` / `app` / `app` / `5432` |
+
+`DATABASE_URL` обязателен: без него процесс падает на старте с сообщением
+`Invalid environment configuration: - DATABASE_URL: must be a valid connection URL`.
+PM2 и `npm run dev`/`npm start` подгружают `.env` сами, экспортировать переменные
+вручную не нужно.
+
+`DATABASE_SSL=true` нужен для управляемых баз (RDS, Neon, Supabase), которые
+требуют TLS. `POSTGRES_*` читает только сервис `db` в compose, чтобы собрать
+из них `DATABASE_URL` для контейнера приложения.
 
 Пример — `.env.example`. Файл `.env` в git не попадает.
 
@@ -110,11 +205,18 @@ npm run pm2:flush    # очистить логи
 
 ```
 src/
-  index.ts    точка входа, graceful shutdown по SIGINT/SIGTERM
-  config.ts   схема и валидация env
-  logger.ts   фабрика Pino с redact секретов
-  server.ts   HTTP-сервер и /health
-test/         юнит- и интеграционные тесты
+  index.ts        точка входа, graceful shutdown по SIGINT/SIGTERM
+  config.ts       схема и валидация env
+  logger.ts       фабрика Pino с redact секретов
+  server.ts       HTTP-сервер и /health
+  db/
+    schema.ts     таблицы Drizzle
+    pool.ts       pg.Pool из конфига
+    client.ts     drizzle-клиент, ping, close
+    health.ts     пинг БД и отчёт для /health
+test/             юнит- и интеграционные тесты
+drizzle/          сгенерированные SQL-миграции (в git)
+drizzle.config.ts конфиг drizzle-kit
 ecosystem.config.cjs   конфиг PM2 (общий для хоста и контейнера)
 AGENTS.md             инструкции для агентов (единый источник правды)
 CONTRIBUTING.md       те же правила для людей
@@ -125,26 +227,41 @@ CONTRIBUTING.md       те же правила для людей
 ```bash
 npm run docker:build
 npm run docker:run
-# или
+# или всё вместе с базой
 docker compose up --build
 ```
 
-Образ multi-stage: стадии `deps` → `build` → `prod-deps` → `runtime`.
+Compose поднимает два сервиса: `db` (Postgres 18 с healthcheck и именованным
+volume) и `app`. Приложение стартует только после того, как `db` станет healthy,
+а `DATABASE_URL` собирается из `POSTGRES_*` и указывает на сервис по имени — не
+на `localhost`, потому что внутри сети compose это разные машины.
+
+Volume монтируется на `/var/lib/postgresql`, а не на привычный
+`/var/lib/postgresql/data`: в PostgreSQL 18 официальный образ перенёс `PGDATA`
+в версионную поддиректорию и объявил `VOLUME` на `/var/lib/postgresql`.
+Монтирование старого пути привело бы к тому, что данные осели бы в анонимном
+томе и пропали бы при пересоздании контейнера.
+
+Образ приложения multi-stage: стадии `deps` → `build` → `prod-deps` → `runtime`.
 В рантайме только production-зависимости, непривилегированный пользователь
 (`uid 10001`), `tini` как PID 1, встроенный `HEALTHCHECK` и ротация логов в compose.
 Точкой входа служит `pm2-runtime` (см. раздел про PM2).
 
 ## CI
 
-`.github/workflows/ci.yml` — четыре джобы на каждый push и PR в `main`:
+`.github/workflows/ci.yml` — пять джоб на каждый push и PR в `main`:
 
 1. **verify** — format check, lint, typecheck, тесты с coverage-порогами;
-2. **build** — сборка, smoke-тест `node dist/index.js` через `/health` и проверка
+2. **migrations** — `db:check`, проверка что схема и миграции не разошлись,
+   применение миграций к настоящему Postgres;
+3. **build** — сборка, smoke-тест `node dist/index.js` через `/health` и проверка
    graceful shutdown по `SIGTERM`;
-3. **pm2** — реальный старт под PM2, рестарт с новым pid, проверка записи в `logs/`;
-4. **docker** — сборка образа с GHA cache и проверка health-check в контейнере.
+4. **pm2** — реальный старт под PM2, рестарт с новым pid, проверка записи в `logs/`;
+5. **docker** — сборка образа с GHA cache и проверка health-check в контейнере.
 
-Джобы 2–4 зависят от `verify`, поэтому сломанный линт не тратит время на сборку образа.
+Джобы 2–5 зависят от `verify`, поэтому сломанный линт не тратит время на сборку образа.
+Джобы 2–5 поднимают Postgres как service container: без живой базы нечего проверять —
+`/health` вернул бы 503, а `db:migrate` не имел бы куда примениться.
 `concurrency` отменяет предыдущий прогон для того же ref, есть `timeout-minutes`
 на каждой джобе. Dependabot обновляет npm-зависимости и Actions раз в неделю.
 

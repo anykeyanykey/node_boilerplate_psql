@@ -8,6 +8,20 @@ const schema = z.object({
   HOST: z.string().min(1).default('0.0.0.0'),
   SHUTDOWN_TIMEOUT_MS: z.coerce.number().int().positive().default(10_000),
   API_TOKEN: z.string().min(1).optional(),
+
+  DATABASE_URL: z.url({ message: 'must be a valid connection URL' }),
+  DATABASE_POOL_MAX: z.coerce.number().int().min(1).max(100).default(10),
+  DATABASE_IDLE_TIMEOUT_MS: z.coerce.number().int().min(0).default(30_000),
+  DATABASE_CONNECT_TIMEOUT_MS: z.coerce.number().int().min(0).default(5_000),
+  DATABASE_STATEMENT_TIMEOUT_MS: z.coerce.number().int().min(0).default(10_000),
+  DATABASE_SSL: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((value) => value === 'true'),
+  DB_REQUIRED: z
+    .enum(['true', 'false'])
+    .default('true')
+    .transform((value) => value === 'true'),
 });
 
 export type Config = z.infer<typeof schema>;

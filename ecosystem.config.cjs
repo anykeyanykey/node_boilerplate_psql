@@ -13,6 +13,17 @@
  */
 const logToStdout = process.env['LOG_TO_STDOUT'] === 'true';
 
+// PM2 does not read .env on its own, so on the host it would boot the app
+// without DATABASE_URL and crash-loop on the Zod validation. Loading the file
+// here keeps `npm run pm2:start` behaving like `npm run dev`. Inside the
+// container there is no .env and the variables arrive from compose instead.
+try {
+  process.loadEnvFile('.env');
+} catch {
+  // No .env on this host: fall through and let the app validate the
+  // environment it was actually given.
+}
+
 module.exports = {
   apps: [
     {

@@ -58,11 +58,74 @@ jobs:
         with:
           configFile: commitlint.config.mjs
 
+  migrations:
+    name: Migrations
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: verify
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: app
+          POSTGRES_PASSWORD: app
+          POSTGRES_DB: app
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U app -d app"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://app:app@127.0.0.1:5432/app
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - run: npm ci
+
+      - name: Check the committed migrations are internally consistent
+        run: npm run db:check
+
+      - name: Check the schema and the migrations agree
+        run: |
+          npm run db:generate
+          if [ -n "$(git status --porcelain -- drizzle src/db/schema.ts)" ]; then
+            echo "::error::schema and migrations are out of sync. Run 'npm run db:generate' and commit the result."
+            git --no-pager diff -- drizzle src/db/schema.ts
+            exit 1
+          fi
+          echo "schema and migrations are in sync"
+
+      - name: Apply every migration to a real database
+        run: npm run db:migrate
+
   build:
     name: Build
     runs-on: ubuntu-latest
     timeout-minutes: 10
     needs: verify
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: app
+          POSTGRES_PASSWORD: app
+          POSTGRES_DB: app
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U app -d app"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://app:app@127.0.0.1:5432/app
     steps:
       - uses: actions/checkout@v5
 
@@ -78,6 +141,8 @@ jobs:
           node dist/index.js &
           APP_PID=$!
           sleep 2
+          # --fail only passes on 2xx, and /health answers 503 while a required
+          # database is unreachable, so this also proves the database is up.
           curl --fail --silent --show-error http://127.0.0.1:3000/health
           echo
       - name: Verify graceful shutdown on SIGTERM
@@ -100,6 +165,22 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     needs: verify
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: app
+          POSTGRES_PASSWORD: app
+          POSTGRES_DB: app
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U app -d app"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://app:app@127.0.0.1:5432/app
     steps:
       - uses: actions/checkout@v5
 
@@ -158,6 +239,20 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     needs: verify
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: app
+          POSTGRES_PASSWORD: app
+          POSTGRES_DB: app
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U app -d app"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v5
 
@@ -175,7 +270,11 @@ jobs:
 
       - name: Run container and check health endpoint
         run: |
-          docker run -d --name node_boilerplate_psql-ci -p 3000:3000 node_boilerplate_psql:ci
+          # Host networking so the container reaches the postgres service on the
+          # runner's own loopback interface; -p is meaningless under --network host.
+          docker run -d --name node_boilerplate_psql-ci --network host \
+            -e DATABASE_URL=postgresql://app:app@127.0.0.1:5432/app \
+            node_boilerplate_psql:ci
           for i in $(seq 1 20); do
             if curl --fail --silent http://127.0.0.1:3000/health; then
               echo "\ncontainer is healthy"

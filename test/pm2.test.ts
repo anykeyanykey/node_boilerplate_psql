@@ -48,7 +48,9 @@ describe('ecosystem.config.cjs', () => {
 
   it('allows PM2 more time to stop than the app needs to shut down', () => {
     const app = loadEcosystem();
-    const { SHUTDOWN_TIMEOUT_MS } = loadConfig({});
+    const { SHUTDOWN_TIMEOUT_MS } = loadConfig({
+      DATABASE_URL: 'postgresql://a:b@127.0.0.1:5432/c',
+    });
 
     expect(app.kill_timeout).toBeGreaterThan(SHUTDOWN_TIMEOUT_MS);
   });

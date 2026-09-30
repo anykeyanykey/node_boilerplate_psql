@@ -1,10 +1,16 @@
 import { pino } from 'pino';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createAppServer, type AppServerOptions } from '../src/server.js';
+import type { HealthReport } from '../src/db/health.js';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 
 const servers: Server[] = [];
+
+const OK_REPORT: HealthReport = {
+  status: 'ok',
+  checks: { database: { state: 'up', latencyMs: 1 } },
+};
 
 afterEach(async () => {
   const open = servers.splice(0);
@@ -25,6 +31,7 @@ async function startServer(overrides: Partial<AppServerOptions> = {}): Promise<s
     logger: pino({ level: 'silent' }),
     port: 0,
     host: '127.0.0.1',
+    checkHealth: () => Promise.resolve(OK_REPORT),
     ...overrides,
   });
   servers.push(server);
@@ -45,7 +52,53 @@ describe('createAppServer', () => {
     const response = await fetch(`${base}/health`);
 
     expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toEqual({ status: 'ok' });
+    await expect(response.json()).resolves.toEqual(OK_REPORT);
+  });
+
+  it('responds 503 on GET /health when the report is an error', async () => {
+    const base = await startServer({
+      checkHealth: () =>
+        Promise.resolve({
+          status: 'error',
+          checks: { database: { state: 'down', latencyMs: 2, error: 'ping_failed' } },
+        }),
+    });
+
+    const response = await fetch(`${base}/health`);
+
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toMatchObject({ status: 'error' });
+  });
+
+  it('responds 200 on GET /health when the report is only degraded', async () => {
+    const base = await startServer({
+      checkHealth: () =>
+        Promise.resolve({
+          status: 'degraded',
+          checks: { database: { state: 'down', latencyMs: 2, error: 'ping_failed' } },
+        }),
+    });
+
+    const response = await fetch(`${base}/health`);
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ status: 'degraded' });
+  });
+
+  it('responds 503 when the health check itself throws', async () => {
+    const errors: unknown[] = [];
+    const base = await startServer({
+      logger: Object.assign(pino({ level: 'silent' }), {
+        error: (obj: unknown) => errors.push(obj),
+      }),
+      checkHealth: () => Promise.reject(new Error('checker is broken')),
+    });
+
+    const response = await fetch(`${base}/health`);
+
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toEqual({ status: 'error', checks: {} });
+    expect(errors).toHaveLength(1);
   });
 
   it('responds 404 with a json body for unknown routes', async () => {
@@ -77,6 +130,7 @@ describe('createAppServer', () => {
       }),
       port: Number(port),
       host: '127.0.0.1',
+      checkHealth: () => Promise.resolve(OK_REPORT),
     });
     servers.push(server);
 
